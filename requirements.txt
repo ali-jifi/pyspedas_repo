@@ -1,0 +1,5 @@
+pyspedas>=2.0
+matplotlib
+numpy
+jupyter
+ipykernel
