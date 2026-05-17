@@ -9,7 +9,6 @@ def check(label, condition, detail=""):
     if not condition:
         sys.exit(1)
 
-
 # 1 - imports
 try:
     import pyspedas
