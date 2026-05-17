@@ -32,7 +32,7 @@ print(f"\nLoading THEMIS-{probe.upper()} ESA L2 for {trange[0]}...")
 loaded = pyspedas.projects.themis.esa(probe=probe, trange=trange, level="l2")
 check("esa() returned variables", bool(loaded), f"{len(loaded)} vars")
 
-# 4. Target variable present
+# 4 target variable present
 target = "tha_peif_en_eflux"
 check(f"{target} in tplot store", target in tplot_names(quiet=True))
 
@@ -40,7 +40,7 @@ d = get_data(target)
 check(f"{target} has data", d is not None and len(d.times) > 0,
       f"{len(d.times)} time samples" if d is not None else "no data")
 
-# 5. Render PNG
+# 5 render png
 out = Path("test_plot_output.png")
 if out.exists():
     out.unlink()
