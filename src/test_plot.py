@@ -9,7 +9,7 @@ def check(label, condition, detail=""):
     if not condition:
         sys.exit(1)
 
-# 1 - imports
+# 1 imports
 try:
     import pyspedas
     from pyspedas import tplot, options, tplot_options, get_data
@@ -20,12 +20,12 @@ except Exception as e:
     sys.exit(1)
 check("imports", True, f"pyspedas {pyspedas.version()}")
 
-# 2 - env var
+# 2 env var
 data_dir = os.environ.get("THM_DATA_DIR")
 check("THM_DATA_DIR set", data_dir is not None, data_dir or "missing")
 check("data dir exists", Path(data_dir).exists(), data_dir)
 
-# 3 - download + load
+# 3 download + load
 probe = "a"
 trange = ["2019-05-01", "2019-05-02"]
 print(f"\nLoading THEMIS-{probe.upper()} ESA L2 for {trange[0]}...")
