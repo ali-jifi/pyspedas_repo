@@ -1,4 +1,4 @@
-"""Single-probe ESA ion eflux plot. Example: python scripts/plot_single_probe.py --probe a --date 2019-05-01"""
+# single-probe esa ion eflux plot
 import argparse
 from datetime import datetime, timedelta
 from pathlib import Path

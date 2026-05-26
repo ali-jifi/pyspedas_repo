@@ -35,7 +35,7 @@ def stack_plot(
     vertical_spacing: float = 0.05,
     display: bool = False,
 ) -> list[str]:
-    """Filter to vars that loaded, set common options, render to PNG. Returns plotted vars."""
+    # filters to loaded vars, renders to png, returns plotted
     plotted = [v for v in variables if data_exists(v)]
     missing = [v for v in variables if v not in plotted]
     if missing:

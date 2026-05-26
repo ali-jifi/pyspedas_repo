@@ -1,4 +1,4 @@
-"""Smoke test: imports, env, download, render one PNG. Run from repo root."""
+# smoke test, imports + env + download + render one png
 import sys
 from pathlib import Path
 

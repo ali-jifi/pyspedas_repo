@@ -11,6 +11,8 @@ dependencies = [
     "pyspedas>=2.0",
     "matplotlib",
     "numpy",
+    "scipy",
+    "cdflib",
 ]
 
 [project.optional-dependencies]

@@ -7,7 +7,7 @@ DEFAULT_COLORMAP = "spedas"
 
 
 def set_data_dir(path: str | os.PathLike | None = None) -> str:
-    """Resolve and export THM_DATA_DIR. Falls back to env var, then ./data."""
+    # resolves thm_data_dir, falls back to env var then ./data
     if path is None:
         path = os.environ.get("THM_DATA_DIR")
     if path is None:

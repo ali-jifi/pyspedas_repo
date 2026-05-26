@@ -1,4 +1,4 @@
-"""Multi-probe ESA ion eflux stack plot. Example: python scripts/plot_multi_probe.py --date 2009-02-27"""
+# multi-probe esa ion eflux stack plot
 import argparse
 from datetime import datetime, timedelta
 from pathlib import Path
