@@ -197,21 +197,28 @@ def _compute_pitch_angles(theta_inst: np.ndarray, phi_inst: np.ndarray,
                           b_dsl: np.ndarray, phi_offset: float) -> np.ndarray:
     # pa btwn particle vel and b, vel is opposite to look dir
     theta_rad = np.deg2rad(theta_inst)
+    # phi_offset corrects spin phase from inst frame to dsl
     phi_rad = np.deg2rad(phi_inst + phi_offset)
 
+    # sphere to cartesian, theta is elevation so cos goes on x/y
+    # need vector form to dot with b-field below
     look_x = np.cos(theta_rad) * np.cos(phi_rad)
     look_y = np.cos(theta_rad) * np.sin(phi_rad)
     look_z = np.sin(theta_rad)
 
-    # particle vel is opposite look dir
+    # detector sees particles coming in, so v = -look
     vx, vy, vz = -look_x, -look_y, -look_z
 
     b_mag = np.linalg.norm(b_dsl)
+    # skip when b is too small, pa is undefined
     if b_mag < 0.1:
         return np.full_like(theta_inst, np.nan)
 
     bhat = b_dsl / b_mag
+    # cos(pa) = vhat . bhat, both are unit vectors
+    # dot product of unit vectors gives cos of angle between them
     cos_pa = vx * bhat[0] + vy * bhat[1] + vz * bhat[2]
+    # clip floating point overshoot before arccos
     cos_pa = np.clip(cos_pa, -1.0, 1.0)
     return np.rad2deg(np.arccos(cos_pa))
 
@@ -267,14 +274,20 @@ def compute_pa_spectra(
             if not np.any(good):
                 continue
 
+            # solid-angle weighted avg, bigger bins count more
+            # equal-weight avg would bias toward small high-latitude bins
             total_weight = dw[good].sum()
             if total_weight > 0:
                 omni[t, e] = np.sum(f[good] * dw[good]) / total_weight
 
+            # gate by pa range then weighted avg over the cone only
+            # isolates the directional pop we care about
             in_para = good & (pa >= para_range[0]) & (pa <= para_range[1])
             if np.any(in_para):
                 w_para = dw[in_para].sum()
                 para[t, e] = np.sum(f[in_para] * dw[in_para]) / w_para
+                # coverage = frac of solid angle inside the cone
+                # low coverage means the avg is unreliable, drop it downstream
                 cov_para[t] = max(cov_para[t], w_para / total_weight)
 
             in_anti = good & (pa >= anti_range[0]) & (pa <= anti_range[1])
@@ -299,11 +312,13 @@ class FeatureTable:
     # per-timestep features for beam classification
     times: np.ndarray
     e_peak: np.ndarray           # energy of max flux, ev
+    e_beam: np.ndarray           # energy where max |asym| was found, ev
     width: np.ndarray            # normalized spectral width
-    asymmetry: np.ndarray        # (f_para - f_anti) / (f_para + f_anti) near e_peak
-    para_to_omni: np.ndarray     # parallel cone / omni ratio near e_peak
+    asymmetry: np.ndarray        # signed asym at e_beam, picked from max |asym| across bins
+    para_to_omni: np.ndarray     # parallel cone / omni ratio at e_beam
     energy_ratio: np.ndarray     # e_flow / e_th from moments
-    pa_coverage_ok: np.ndarray   # bool, both cones adequately sampled
+    pa_ok_both: np.ndarray       # bool, both cones sampled, asym is trustworthy
+    pa_ok_para: np.ndarray       # bool, para cone sampled, p2o is trustworthy
 
 
 PROTON_MASS_KG = 1.6726219e-27
@@ -316,6 +331,7 @@ def extract_features(
     moments: dict,
     energy_cutoff_low: float = 30.0,
     pa_coverage_threshold: float = 0.01,
+    beam_flux_floor: float = 0.1,
 ) -> FeatureTable:
     ntime = len(spectra.times)
     energy = spectra.energy
@@ -324,11 +340,13 @@ def extract_features(
     e_valid = energy[valid_e]
 
     e_peak = np.full(ntime, np.nan)
+    e_beam = np.full(ntime, np.nan)
     width = np.full(ntime, np.nan)
     asymmetry = np.full(ntime, np.nan)
     para_to_omni = np.full(ntime, np.nan)
     energy_ratio = np.full(ntime, np.nan)
-    pa_ok = np.zeros(ntime, dtype=bool)
+    pa_ok_both = np.zeros(ntime, dtype=bool)
+    pa_ok_para = np.zeros(ntime, dtype=bool)
 
     if "velocity" in moments and "temperature" in moments:
         vel_interp = interp1d(moments["velocity_times"], moments["velocity"],
@@ -345,52 +363,91 @@ def extract_features(
         para_t = spectra.para[t, valid_e]
         anti_t = spectra.anti[t, valid_e]
 
-        pa_ok[t] = (spectra.pa_coverage_para[t] >= pa_coverage_threshold and
-                    spectra.pa_coverage_anti[t] >= pa_coverage_threshold)
+        # per-feature coverage: asym needs both cones, p2o only needs para
+        para_ok = spectra.pa_coverage_para[t] >= pa_coverage_threshold
+        anti_ok = spectra.pa_coverage_anti[t] >= pa_coverage_threshold
+        pa_ok_para[t] = para_ok
+        pa_ok_both[t] = para_ok and anti_ok
 
         if np.all(np.isnan(omni_t)):
             continue
         omni_finite = np.where(np.isfinite(omni_t), omni_t, 0.0)
+        # peak energy = argmax of omni spectrum
+        # characterizes where the bulk population sits in energy
         idx_peak = np.argmax(omni_finite)
         e_peak[t] = e_valid[idx_peak]
 
-        # flux-weighted energy spread normalized by e_peak
+        # width = std/mean of flux distribution over energy, narrow beam -> small
         total_flux = np.nansum(omni_finite)
         if total_flux > 0 and e_peak[t] > 0:
+            # flux-weighted mean energy, like center of mass
+            # high-flux bins dominate so it tracks the populated part of the spectrum
             e_mean = np.nansum(omni_finite * e_valid) / total_flux
+            # flux-weighted variance
+            # 2nd moment of the flux dist, measures energy spread
             e_var = np.nansum(omni_finite * (e_valid - e_mean) ** 2) / total_flux
+            # normalize by e_peak so width is dimensionless
             width[t] = np.sqrt(e_var) / e_peak[t]
 
-        # +/-2 energy bins around peak for asymmetry window
-        lo = max(0, idx_peak - 2)
-        hi = min(len(e_valid), idx_peak + 3)
-        f_para = np.nanmean(para_t[lo:hi])
-        f_anti = np.nanmean(anti_t[lo:hi])
+        # scan all bins for max |asym|, catches beams that ride on a plasma sheet
+        # peak-window approach misses beams when e_peak is the plasma sheet not the beam
+        peak_omni = omni_finite[idx_peak]
+        # flux floor mask, low-flux bins are noisy and produce spurious asym near +/-1
+        flux_mask = omni_finite >= beam_flux_floor * peak_omni
 
-        if np.isfinite(f_para) and np.isfinite(f_anti) and (f_para + f_anti) > 0:
-            asymmetry[t] = (f_para - f_anti) / (f_para + f_anti)
+        # per-bin signed asym
+        denom_asym = para_t + anti_t
+        with np.errstate(invalid="ignore", divide="ignore"):
+            asym_bins = np.where(denom_asym > 0,
+                                 (para_t - anti_t) / denom_asym, np.nan)
+        # per-bin p2o
+        with np.errstate(invalid="ignore", divide="ignore"):
+            p2o_bins = np.where(omni_finite > 0,
+                                para_t / omni_finite, np.nan)
 
-        f_omni = np.nanmean(omni_finite[lo:hi])
-        if np.isfinite(f_para) and f_omni > 0:
-            para_to_omni[t] = f_para / f_omni
+        # find bin with max |asym| among bins clearing the flux floor
+        asym_search = np.where(flux_mask & np.isfinite(asym_bins),
+                               np.abs(asym_bins), -np.inf)
+        if pa_ok_both[t] and np.any(np.isfinite(asym_search) & (asym_search > -np.inf)):
+            best = int(np.argmax(asym_search))
+            asymmetry[t] = asym_bins[best]
+            e_beam[t] = e_valid[best]
+            if pa_ok_para[t] and np.isfinite(p2o_bins[best]):
+                para_to_omni[t] = p2o_bins[best]
+        else:
+            # fallback to peak +/-2 window when no bins qualify, avoids all-nan output
+            lo = max(0, idx_peak - 2)
+            hi = min(len(e_valid), idx_peak + 3)
+            f_para = np.nanmean(para_t[lo:hi])
+            f_anti = np.nanmean(anti_t[lo:hi])
+            f_omni = np.nanmean(omni_finite[lo:hi])
+            if pa_ok_both[t] and np.isfinite(f_para) and np.isfinite(f_anti) and (f_para + f_anti) > 0:
+                asymmetry[t] = (f_para - f_anti) / (f_para + f_anti)
+                e_beam[t] = e_peak[t]
+            if pa_ok_para[t] and np.isfinite(f_para) and f_omni > 0:
+                para_to_omni[t] = f_para / f_omni
 
-        # e_flow = 0.5 * m * v^2 in ev
+        # e_flow/e_th, ratio of bulk kinetic to thermal energy, beams have higher ratio
         if vel_interp is not None and temp_interp is not None:
             v = vel_interp(spectra.times[t])
             T = temp_interp(spectra.times[t])
             if np.all(np.isfinite(v)) and np.isfinite(T) and T > 0:
                 v_mag = np.linalg.norm(v)
+                # 1/2 m v^2 in joules, then convert to ev, v is km/s so *1e3
+                # puts e_flow in same units as T so the ratio is meaningful
                 e_flow = 0.5 * PROTON_MASS_KG * (v_mag * 1e3) ** 2 * EV_PER_JOULE
                 energy_ratio[t] = e_flow / T
 
     return FeatureTable(
         times=spectra.times,
         e_peak=e_peak,
+        e_beam=e_beam,
         width=width,
         asymmetry=asymmetry,
         para_to_omni=para_to_omni,
         energy_ratio=energy_ratio,
-        pa_coverage_ok=pa_ok,
+        pa_ok_both=pa_ok_both,
+        pa_ok_para=pa_ok_para,
     )
 
 
@@ -402,6 +459,8 @@ class ClassifierParams:
     para_to_omni_min: float = 1.3
     energy_ratio_min: float = 0.5
     score_threshold: float = 0.4
+    min_coverage: float = 0.01
+    beam_flux_floor: float = 0.1
     # weights, spectral > moments
     w_asymmetry: float = 0.35
     w_width: float = 0.25
@@ -433,18 +492,23 @@ def classify_beams(features: FeatureTable,
         w = features.width[t]
         p2o = features.para_to_omni[t]
 
-        if not features.pa_coverage_ok[t]:
-            continue
+        # no full-timestep gate, nan-features score 0 and naturally drop out
 
-        # component scores, 0 to 1
+        # component scores in [0,1], 1 means feature fully satisfies its threshold
+        # ramp: 0 at asym=0, 0.5 at threshold, capped at 1 when asym = 2*threshold
+        # smooth ramp lets borderline features still contribute to total score
         s_asym = 0.0
         if np.isfinite(asym):
             s_asym = np.clip(abs(asym) / params.asymmetry_min, 0, 2) / 2
 
+        # ramp: 1 at width=0, 0 at width_max, 0 beyond
+        # inverted cuz beams have narrow spectra, lower width = stronger signal
         s_width = 0.0
         if np.isfinite(w):
             s_width = np.clip((params.width_max - w) / params.width_max, 0, 1)
 
+        # ramp shifted so p2o=1 (no enhancement) gives 0, threshold gives 0.5
+        # baseline is 1 not 0 cuz p2o<1 just means para cone is dimmer than avg, not anti-beam
         s_p2o = 0.0
         if np.isfinite(p2o):
             s_p2o = np.clip((p2o - 1.0) / (params.para_to_omni_min - 1.0), 0, 2) / 2
@@ -453,6 +517,7 @@ def classify_beams(features: FeatureTable,
         if np.isfinite(er):
             s_er = np.clip(er / params.energy_ratio_min, 0, 2) / 2
 
+        # weighted sum, weights total to 1 so score stays in [0,1]
         beam_score[t] = (params.w_asymmetry * s_asym +
                          params.w_width * s_width +
                          params.w_para_to_omni * s_p2o +
@@ -666,7 +731,7 @@ def plot_curated_snapshots(
     from datetime import datetime, timezone
 
     beam_idx = np.where(classification.is_beam)[0]
-    ps_idx = np.where(~classification.is_beam & features.pa_coverage_ok)[0]
+    ps_idx = np.where(~classification.is_beam & features.pa_ok_both)[0]
 
     selected = []
     labels = []
@@ -689,7 +754,7 @@ def plot_curated_snapshots(
         borderline = np.where(
             (classification.beam_score > 0.3) &
             (classification.beam_score < 0.7) &
-            features.pa_coverage_ok
+            features.pa_ok_both
         )[0]
         if len(borderline) > 0:
             step = max(1, len(borderline) // 2)
@@ -742,6 +807,8 @@ def run_pipeline(
     energy_cutoff_low: float = 30.0,
     figures_dir: str | None = None,
 ) -> PipelineResult:
+    if params is None:
+        params = ClassifierParams()
     print(f"=== Phase 0: Loading data for THEMIS-{probe.upper()} {trange} ===")
     dist = load_esd_distribution(probe, trange, data_dir)
     print(f"  ESD: {len(dist.times)} timesteps, {len(dist.energy)} energy bins")
@@ -762,7 +829,9 @@ def run_pipeline(
 
     print(f"\n=== Phase 2: Feature extraction ===")
     features = extract_features(spectra, moments,
-                                energy_cutoff_low=energy_cutoff_low)
+                                energy_cutoff_low=energy_cutoff_low,
+                                pa_coverage_threshold=params.min_coverage,
+                                beam_flux_floor=params.beam_flux_floor)
     n_finite = np.sum(np.isfinite(features.asymmetry))
     print(f"  Features computed: {n_finite}/{len(features.times)} with valid asymmetry")
 

@@ -25,6 +25,10 @@ def main() -> None:
                    help="Para-to-omni ratio threshold (default: 1.3)")
     p.add_argument("--score-threshold", type=float, default=0.4,
                    help="Beam score threshold (default: 0.4)")
+    p.add_argument("--min-coverage", type=float, default=0.01,
+                   help="Min PA cone solid-angle coverage (default: 0.01)")
+    p.add_argument("--beam-flux-floor", type=float, default=0.1,
+                   help="Min omni flux as frac of peak for asym scan (default: 0.1)")
     p.add_argument("--no-plots", action="store_true")
     args = p.parse_args()
 
@@ -35,6 +39,8 @@ def main() -> None:
         width_max=args.width_threshold,
         para_to_omni_min=args.p2o_threshold,
         score_threshold=args.score_threshold,
+        min_coverage=args.min_coverage,
+        beam_flux_floor=args.beam_flux_floor,
     )
 
     result = run_pipeline(
